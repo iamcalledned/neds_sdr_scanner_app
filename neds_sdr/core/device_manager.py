@@ -6,29 +6,42 @@ log = logging.getLogger("DeviceManager")
 
 
 class DeviceManager:
-    """Manages all connected SDR dongles."""
+    """Manages all SDR dongles and their channel configurations."""
 
-    def __init__(self, config_manager, event_bus):
+    def __init__(self, config_manager, event_bus, autostart: bool = True):
+        """
+        Args:
+            config_manager: ConfigManager instance
+            event_bus: EventBus instance
+            autostart: whether to auto-connect dongles on startup
+        """
         self.config_manager = config_manager
         self.event_bus = event_bus
         self.dongles: dict[str, SDRReceiver] = {}
+        self.autostart = autostart
 
+        # Initialize all receivers
+        asyncio.create_task(self.initialize())
+
+    # ------------------------------------------------------------------
     async def initialize(self):
-        """Initialize all dongles defined in config.yaml."""
-        cfg = self.config_manager.load()
+        """Load dongles from config and optionally connect them."""
+        cfg = self.config_manager.config
         for d in cfg.get("dongles", []):
-            name = d["name"]
-            log.info("Initializing dongle: %s", name)
-            receiver = SDRReceiver(
-                name=name,
-                host=d.get("host", "127.0.0.1"),
-                port=d.get("port", 1234),
-                gain=d.get("gain", 30),
-                event_bus=self.event_bus,
-            )
-            await receiver.connect()
+            name = d.get("name")
+            host = d.get("host", "127.0.0.1")
+            port = d.get("port", 1234)
+            gain = d.get("gain", 30)
+            receiver = SDRReceiver(name, host, port, gain, self.event_bus)
             self.dongles[name] = receiver
-            self.event_bus.emit("dongle_connected", {"name": name})
+            log.info("Initializing dongle: %s", name)
+
+            if self.autostart:
+                await receiver.connect()
+
+            # Create channels for this dongle
+            for ch_cfg in d.get("channels", []):
+                await receiver.add_channel(ch_cfg)
 
     async def add_dongle(self, name, host, port, gain=30):
         """Add a new dongle at runtime."""

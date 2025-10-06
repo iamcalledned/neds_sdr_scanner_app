@@ -1,36 +1,46 @@
 import yaml
 import logging
 from pathlib import Path
+import os
 
 log = logging.getLogger("ConfigManager")
 
 
 class ConfigManager:
-    """Handles loading and saving SDR configuration from YAML."""
+    """Loads and saves configuration (dongles, channels, sinks)."""
 
-    def __init__(self, path: str):
-        self.path = Path(path)
+    def __init__(self, path: str | None = None):
+        # Default config file location
+        if path is None:
+            base = os.path.dirname(os.path.dirname(__file__))
+            path = os.path.join(base, "config", "config.yaml")
+
+        self.path = path
         self.config = {}
+        self.load()
 
-    def load(self) -> dict:
-        """Load configuration from YAML file."""
-        if not self.path.exists():
-            log.warning("Config file not found. Creating new default.")
+    # ------------------------------------------------------------------
+    def load(self):
+        """Load YAML config or create default."""
+        if not os.path.exists(self.path):
+            log.warning(f"Config file not found: {self.path}. Creating default.")
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
             self.config = {"dongles": []}
-            self.save()
+            self.save(self.config)
         else:
-            with open(self.path, "r") as f:
+            with open(self.path, "r", encoding="utf-8") as f:
                 self.config = yaml.safe_load(f) or {"dongles": []}
-        log.info("Loaded configuration with %d dongles.", len(self.config.get("dongles", [])))
-        return self.config
+            log.info(f"Loaded configuration with {len(self.config.get('dongles', []))} dongles.")
 
-    def save(self, data: dict | None = None):
-        """Save current configuration to YAML."""
-        if data:
-            self.config = data
-        with open(self.path, "w") as f:
-            yaml.dump(self.config, f)
-        log.info("Configuration saved to %s", self.path)
+    # ------------------------------------------------------------------
+    def save(self, config=None):
+        """Save YAML config."""
+        if config is not None:
+            self.config = config
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        with open(self.path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(self.config, f, default_flow_style=False)
+        log.info(f"Configuration saved to {self.path}")
 
     def update_dongle(self, name: str, dongle_cfg: dict):
         """Replace or add a dongle config."""

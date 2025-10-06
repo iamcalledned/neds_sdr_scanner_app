@@ -1,0 +1,47 @@
+dongles:
+- channels:
+  - frequency: 158.9925e6
+    name: PD
+    sink: pd_sink
+    squelch: -40
+    tone_type: DPL
+    tone_value: 223
+  gain: 30
+  host: 127.0.0.1
+  name: PD_Main
+  port: 1234
+- channels:
+  - frequency: 483.725e6
+    name: FD_UHF
+    sink: fd_sink
+    tone_type: DPL
+    tone_value: 39
+  - frequency: 46.22e6
+    name: FD_Lowband
+    sink: fd_sink
+    tone_type: PL
+    tone_value: 123.0
+  gain: 35
+  host: 127.0.0.1
+  name: FD_Main
+  port: 1235
+- gain: 24
+  host: 127.0.0.1
+  name: ''
+  port: 1234
+- gain: 30.0
+  host: 127.0.0.1
+  name: spare
+  port: 12345
+- gain: 30.0
+  host: 127.0.0.1
+  name: spare
+  port: 12345
+- gain: 24
+  host: 127.0.0.1
+  name: ''
+  port: 12345
+- gain: 35
+  host: 127.0.0.1
+  name: Spare
+  port: 12345

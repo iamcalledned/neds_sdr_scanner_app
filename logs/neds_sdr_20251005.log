@@ -1,0 +1,8 @@
+2025-10-05 22:41:43,547 [INFO] root: Logging initialized. Log file: ./logs/neds_sdr_20251005.log
+2025-10-05 22:41:43,548 [INFO] ConfigManager: Loaded configuration with 2 dongles.
+2025-10-05 22:41:43,548 [INFO] DeviceManager: Initializing dongle: PD_Main
+2025-10-05 22:41:43,548 [ERROR] RTL_TCP_Client: Failed to connect to 127.0.0.1:1234 ([Errno 111] Connect call failed ('127.0.0.1', 1234))
+2025-10-05 22:41:43,548 [ERROR] SDRReceiver: [PD_Main] Connection to rtl_tcp failed.
+2025-10-05 22:41:43,548 [INFO] DeviceManager: Initializing dongle: FD_Main
+2025-10-05 22:41:43,548 [ERROR] RTL_TCP_Client: Failed to connect to 127.0.0.1:1235 ([Errno 111] Connect call failed ('127.0.0.1', 1235))
+2025-10-05 22:41:43,548 [ERROR] SDRReceiver: [FD_Main] Connection to rtl_tcp failed.

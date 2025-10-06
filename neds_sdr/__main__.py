@@ -1,5 +1,7 @@
+# neds_sdr/__main__.py
 """
-Neds SDR Control App Entry Point
+Entry point for Neds SDR Control.
+This only starts the UI — no dongles auto-connect.
 """
 
 import sys
@@ -15,16 +17,15 @@ from neds_sdr.ui.app import UIController
 
 
 async def main():
-    # Logging setup
     logging.basicConfig(level=logging.INFO)
     log = logging.getLogger("Main")
 
-    # Backend core
+    # Backend setup
     event_bus = EventBus()
     config = ConfigManager()
-    device_manager = DeviceManager(config, event_bus)
+    device_manager = DeviceManager(config, event_bus, autostart=False)  # no auto-start
 
-    # Start Qt Application first
+    # Qt / asyncio integration
     app = QtWidgets.QApplication(sys.argv)
     qloop = qasync.QEventLoop(app)
     asyncio.set_event_loop(qloop)
@@ -32,7 +33,7 @@ async def main():
     ui = UIController(device_manager, config, event_bus)
     ui.show()
 
-    log.info("UI launched. Entering main loop.")
+    log.info("Neds SDR Control UI launched.")
     with qloop:
         qloop.run_forever()
 
