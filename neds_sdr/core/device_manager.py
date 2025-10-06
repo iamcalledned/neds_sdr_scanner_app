@@ -47,3 +47,33 @@ class DeviceManager:
         for name, r in self.dongles.items():
             await r.disconnect()
         self.event_bus.emit("system_stopped", {})
+
+
+    async def set_gain(self, name: str, gain: float):
+        """Set dongle gain live."""
+        if name not in self.dongles:
+            return
+        r = self.dongles[name]
+        r.gain = gain
+        await r.client.set_gain(gain)
+        self.event_bus.emit("dongle_gain_updated", {"dongle": name, "gain": gain})
+        # persist
+        for d in self.config_manager.config.get("dongles", []):
+            if d["name"] == name:
+                d["gain"] = gain
+        self.config_manager.save(self.config_manager.config)
+
+    async def retune_channel(self, dongle_name: str, channel_id: str, freq_mhz: float):
+        """Change channel frequency live."""
+        r = self.dongles.get(dongle_name)
+        if not r:
+            return
+        ch = r.channels.get(channel_id)
+        if not ch:
+            return
+        await ch.set_frequency(freq_mhz * 1e6)
+        self.event_bus.emit("channel_retuned", {
+            "dongle": dongle_name,
+            "channel": channel_id,
+            "frequency": freq_mhz
+        })

@@ -1,5 +1,2 @@
-# For use with pip: pip install -r requirements.txt
-
-# numpy
-# scipy
-# pyqt6
+PyQt6
+qasync
