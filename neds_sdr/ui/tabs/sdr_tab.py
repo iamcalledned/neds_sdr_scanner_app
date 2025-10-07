@@ -39,7 +39,9 @@ class SdrTab(QtWidgets.QWidget):
     def refresh_table(self):
         """Refresh the list of channels from backend."""
         dongles = self.app.device_manager.dongles
-        total_channels = sum(len(r.channels) for r in dongles.values())
+        total_channels = sum(
+    len(r.channels) for r in dongles.values() if hasattr(r, "channels")
+)
         self.table.setRowCount(total_channels)
         row = 0
 
