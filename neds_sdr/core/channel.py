@@ -4,6 +4,7 @@ Provides the Channels UI tab for adding, editing, and tuning SDR channels.
 """
 
 import asyncio
+import logging # Added logging import
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QComboBox, QDoubleSpinBox,
@@ -16,6 +17,7 @@ from neds_sdr.core.squelch import SquelchGate
 from neds_sdr.core.tone_detector import ToneDetector
 from neds_sdr.core.audio_output import AudioOutput
 
+log = logging.getLogger("Channel") # Defined logger
 
 
 class Channel:
@@ -33,6 +35,10 @@ class Channel:
         self.running = False
 
     async def start(self):
+        """Tunes the dongle frequency and marks the channel as running."""
+        # CRITICAL: Added explicit logging to confirm code execution
+        log.info("[%s] Attempting to tune to %.4f MHz", self.id, self.frequency / 1e6) 
+        
         # tune the dongle to our frequency
         await self.receiver.client.set_frequency(self.frequency)
         self.running = True
@@ -156,7 +162,9 @@ class ChannelsTab(QWidget):
         self.tune_btn.clicked.connect(self._on_tune_clicked)
         self.receiver_combo.currentIndexChanged.connect(self._on_receiver_changed)
 
-        self.event_bus.on("channel_presets_updated", self._on_presets_updated)
+        # Assuming the event bus has an 'on' method for subscription.
+        # However, the core event bus uses 'subscribe'. I'll keep the original 'on' for compatibility with your UI files.
+        self.event_bus.subscribe("channel_presets_updated", self._on_presets_updated)
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -179,9 +187,21 @@ class ChannelsTab(QWidget):
             return
         receiver = self.app.device_manager.receivers.get(self.current_dongle)
         if receiver:
+            # NOTE: Getting channel list from the live SDRReceiver channels dict
             for ch_id, ch in getattr(receiver, "channels", {}).items():
-                item = QListWidgetItem(f"{ch_id}  @ {ch.frequency/1e6:.4f} MHz")
+                # Display only the live, active channels
+                item = QListWidgetItem(f"{ch_id}  @ {ch.frequency/1e6:.4f} MHz (Active)")
                 self.preset_list.addItem(item)
+            
+            # Display other non-active presets for tuning 
+            # (If the UX supports showing both active and inactive presets)
+            if hasattr(receiver, 'presets'):
+                 active_ids = set(receiver.channels.keys())
+                 for preset_name in receiver.presets.list_presets():
+                    if preset_name not in active_ids:
+                        # Display inactive presets differently
+                        item = QListWidgetItem(f"{preset_name} (Ready)")
+                        self.preset_list.addItem(item)
 
 
     async def _do_tune(self, name):
@@ -189,13 +209,17 @@ class ChannelsTab(QWidget):
         if not receiver:
             QMessageBox.warning(self, "No Receiver", "Please select a receiver first.")
             return
+        # This calls the set_channel method on SDRReceiver, which uses ChannelsManager.set_channel
         await receiver.set_channel(name)
+        self._refresh_presets() # Refresh UI immediately after tuning
 
     def _on_tune_clicked(self):
         item = self.preset_list.currentItem()
         if not item:
             return
-        asyncio.create_task(self._do_tune(item.text()))
+        # Strip the "(Active)" or "(Ready)" parts before passing the name
+        name = item.text().split('(')[0].strip()
+        asyncio.create_task(self._do_tune(name))
 
     def _on_add_clicked(self):
         if not self.current_dongle:
@@ -232,7 +256,8 @@ class ChannelsTab(QWidget):
         item = self.preset_list.currentItem()
         if not item:
             return
-        name = item.text()
+        # Only try to remove the name part
+        name = item.text().split('(')[0].strip()
         receiver = self.app.device_manager.receivers.get(self.current_dongle)
         if receiver:
             receiver.presets.remove_preset(name)

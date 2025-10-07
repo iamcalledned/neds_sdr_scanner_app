@@ -1,13 +1,17 @@
 """
 receiver.py
-... (unchanged)
+High-level per-dongle SDR receiver runtime.
+
+Each SDRReceiver instance manages one rtl_tcp connection and
+multiple logical channels. Each channel can have its own
+frequency, squelch, tone, and sink routing.
 """
 
 import asyncio
 import logging
 import numpy as np
 from neds_sdr.core.rtl_tcp_client import RTL_TCP_Client
-#from neds_sdr.core.channel import Channel # Kept commented out as in original
+#from neds_sdr.core.channel import Channel # Kept commented out for flow control
 from neds_sdr.core.channels_manager import ChannelsManager
 
 log = logging.getLogger("SDRReceiver")
@@ -37,29 +41,24 @@ class SDRReceiver:
 
     async def connect(self):
         """Connect to TCP server and initialize base configuration."""
+        log.info("[%s] Attempting connection and configuration.", self.name)
         await self.client.connect()
         if not self.client.connected:
             log.error("[%s] Connection to rtl_tcp failed.", self.name)
             return
 
-        # Configure the dongle - relying on internal delays in RTL_TCP_Client now.
+        # Configure the dongle
         await self.client.set_sample_rate(self.sample_rate)
+        await asyncio.sleep(0.05)
         await self.client.set_gain(self.gain)
-        # Give the core device config a final breath before starting RX.
-        await asyncio.sleep(0.1) 
+        await asyncio.sleep(0.05)
 
         # Mark running and start persistent reader loop
         self.running = True
         log.info("[%s] Connected to %s:%d (gain=%.1f)", self.name, self.host, self.port, self.gain)
+        #breakpoint()
         self._rx_task = asyncio.create_task(self._rx_loop())
         
-        # --- NEW LOGIC: Automatically start the first channel preset ---
-        preset_names = self.presets.list_presets()
-        if preset_names:
-            first_preset = preset_names[0]
-            log.info("[%s] Auto-tuning to first preset: %s", self.name, first_preset)
-            await self.presets.set_channel(first_preset) # Use the ChannelsManager to start the channel
-        # --- END NEW LOGIC ---
 
     async def disconnect(self):
         """Stop all channels and close TCP connection."""
@@ -96,22 +95,28 @@ class SDRReceiver:
 
     async def add_channel(self, channel_config: dict):
         """Create and start a new logical channel for this dongle."""
-        from neds_sdr.core.channel import Channel  # ← move it here
+        # CRITICAL: Local import must be inside the async method's body
+        log.info("[%s] Starting add_channel for config: %s", self.name, channel_config.get("id"))
+        try:
+            from neds_sdr.core.channel import Channel
 
-        ch_id = channel_config.get("id", f"ch_{len(self.channels)}")
-        if ch_id in self.channels:
-            log.warning("[%s] Channel %s already exists.", self.name, ch_id)
-            return
+            ch_id = channel_config.get("id", f"ch_{len(self.channels)}")
+            if ch_id in self.channels:
+                log.warning("[%s] Channel %s already exists.", self.name, ch_id)
+                return
 
-        # 1. Create the Channel instance, linking it to this receiver (self).
-        channel = Channel(**channel_config, receiver=self, event_bus=self.event_bus)
-        self.channels[ch_id] = channel
-        
-        # 2. Start the channel. This is where the call to set_frequency() happens.
-        await channel.start()
-        
-        self.event_bus.emit("channel_added", {"dongle": self.name, "channel": ch_id})
-        log.info("[%s] Added channel %s @ %.4f MHz", self.name, ch_id, channel.frequency / 1e6)
+            # 1. Create the Channel instance, linking it to this receiver (self).
+            channel = Channel(**channel_config, receiver=self, event_bus=self.event_bus)
+            self.channels[ch_id] = channel
+            
+            # 2. Start the channel. This calls Channel.start() and triggers the set_frequency log.
+            log.info("[%s] Calling Channel.start() for %s.", self.name, ch_id)
+            await channel.start()
+            
+            self.event_bus.emit("channel_added", {"dongle": self.name, "channel": ch_id})
+            log.info("[%s] Added channel %s @ %.4f MHz", self.name, ch_id, channel.frequency / 1e6)
+        except Exception as e:
+            log.error("[%s] Failed to add channel %s: %s", self.name, channel_config.get("id"), e)
 
 
     async def remove_channel(self, ch_id: str):
@@ -149,13 +154,15 @@ class SDRReceiver:
                 iq = (iq - 127.5) / 127.5
 
                 # Emit signal power
-                # Changed event name to align with UI app.py subscription
                 power_db = 10 * np.log10(np.mean(iq ** 2) + 1e-12)
-                self.event_bus.emit("signal_power", {"dongle": self.name, "power": power_db})
+                self.event_bus.emit("signal_update", {"dongle": self.name, "power": power_db})
 
                 # Feed samples to channels
                 for ch in list(self.channels.values()):
                     try:
+                        # Log if no channels are present (helpful for debugging)
+                        if not self.channels:
+                            log.debug("[%s] RX loop running but no active channels.", self.name)
                         await ch.process_samples(iq)
                     except Exception as e:
                         log.error("[%s] Channel %s processing error: %s", self.name, ch.id, e)
