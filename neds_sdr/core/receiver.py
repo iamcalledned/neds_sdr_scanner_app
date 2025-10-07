@@ -1,10 +1,6 @@
 """
 receiver.py
-High-level per-dongle SDR receiver runtime.
-
-Each SDRReceiver instance manages one rtl_tcp connection and
-multiple logical channels. Each channel can have its own
-frequency, squelch, tone, and sink routing.
+... (unchanged)
 """
 
 import asyncio
@@ -46,16 +42,24 @@ class SDRReceiver:
             log.error("[%s] Connection to rtl_tcp failed.", self.name)
             return
 
-        # Configure the dongle
+        # Configure the dongle - relying on internal delays in RTL_TCP_Client now.
         await self.client.set_sample_rate(self.sample_rate)
-        await asyncio.sleep(0.05)
         await self.client.set_gain(self.gain)
-        await asyncio.sleep(0.05)
+        # Give the core device config a final breath before starting RX.
+        await asyncio.sleep(0.1) 
 
         # Mark running and start persistent reader loop
         self.running = True
         log.info("[%s] Connected to %s:%d (gain=%.1f)", self.name, self.host, self.port, self.gain)
         self._rx_task = asyncio.create_task(self._rx_loop())
+        
+        # --- NEW LOGIC: Automatically start the first channel preset ---
+        preset_names = self.presets.list_presets()
+        if preset_names:
+            first_preset = preset_names[0]
+            log.info("[%s] Auto-tuning to first preset: %s", self.name, first_preset)
+            await self.presets.set_channel(first_preset) # Use the ChannelsManager to start the channel
+        # --- END NEW LOGIC ---
 
     async def disconnect(self):
         """Stop all channels and close TCP connection."""
@@ -103,8 +107,7 @@ class SDRReceiver:
         channel = Channel(**channel_config, receiver=self, event_bus=self.event_bus)
         self.channels[ch_id] = channel
         
-        # 2. Start the channel. This is where the call to set_frequency() now happens, 
-        # using the Channel's known frequency and its receiver's client.
+        # 2. Start the channel. This is where the call to set_frequency() happens.
         await channel.start()
         
         self.event_bus.emit("channel_added", {"dongle": self.name, "channel": ch_id})
@@ -146,8 +149,9 @@ class SDRReceiver:
                 iq = (iq - 127.5) / 127.5
 
                 # Emit signal power
+                # Changed event name to align with UI app.py subscription
                 power_db = 10 * np.log10(np.mean(iq ** 2) + 1e-12)
-                self.event_bus.emit("signal_update", {"dongle": self.name, "power": power_db})
+                self.event_bus.emit("signal_power", {"dongle": self.name, "power": power_db})
 
                 # Feed samples to channels
                 for ch in list(self.channels.values()):
