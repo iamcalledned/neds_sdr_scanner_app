@@ -20,12 +20,17 @@ class RTL_TCP_Client:
         self.writer: asyncio.StreamWriter | None = None
         self.connected = False
 
+    # ----------------------------------------------------------------------
+    # Connection management
+    # ----------------------------------------------------------------------
     async def connect(self):
-        """Establish TCP connection."""
+        """Establish TCP connection and initialize manual gain mode."""
         try:
             self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
             self.connected = True
             log.info("Connected to rtl_tcp at %s:%s", self.host, self.port)
+            # rtl_tcp expects gain mode set immediately
+            await self._send_cmd(0x03, 1)  # SET_GAIN_MODE = manual
         except Exception as e:
             log.error("Failed to connect to %s:%s (%s)", self.host, self.port, e)
             self.connected = False
@@ -33,44 +38,74 @@ class RTL_TCP_Client:
     async def close(self):
         """Close connection gracefully."""
         if self.writer:
-            self.writer.close()
-            await self.writer.wait_closed()
+            try:
+                self.writer.close()
+                await self.writer.wait_closed()
+            except Exception:
+                pass
         self.connected = False
         log.info("Disconnected from rtl_tcp %s:%s", self.host, self.port)
 
-    async def set_frequency(self, freq_hz: float):
-        """Send set frequency command."""
+    # ----------------------------------------------------------------------
+    # Core command helpers
+    # ----------------------------------------------------------------------
+    async def _send_cmd(self, cmd: int, value: int):
+        """Send one rtl_tcp command (little-endian)."""
         if not self.writer:
             return
-        cmd = struct.pack(">BI", 0x01, int(freq_hz))
-        self.writer.write(cmd)
-        await self.writer.drain()
+        try:
+            payload = struct.pack("<BI", cmd, int(value))
+            self.writer.write(payload)
+            await self.writer.drain()
+        except Exception as e:
+            log.error("Failed to send cmd 0x%02X: %s", cmd, e)
+            await self.close()
+
+    # ----------------------------------------------------------------------
+    # rtl_tcp protocol commands
+    # ----------------------------------------------------------------------
+    async def set_frequency(self, freq_hz: float):
+        """Set tuner center frequency."""
+        if not self.writer:
+            return
+        await self._send_cmd(0x01, int(freq_hz))
         log.debug("Set frequency to %.4f MHz", freq_hz / 1e6)
 
     async def set_sample_rate(self, sample_rate: int):
-        """Send set sample rate command."""
+        """Set tuner sample rate (Hz)."""
         if not self.writer:
             return
-        cmd = struct.pack(">BI", 0x02, sample_rate)
-        self.writer.write(cmd)
-        await self.writer.drain()
+        await self._send_cmd(0x02, sample_rate)
         log.debug("Set sample rate to %d Hz", sample_rate)
 
     async def set_gain(self, gain_db: float):
-        """Send set gain command."""
+        """Set tuner RF gain (manual mode)."""
         if not self.writer:
             return
-        cmd = struct.pack(">BB", 0x04, int(gain_db))
-        self.writer.write(cmd)
-        await self.writer.drain()
+        await self._send_cmd(0x04, int(gain_db * 10))  # tenths of dB
         log.debug("Set gain to %.1f dB", gain_db)
 
+    async def set_ppm_correction(self, ppm: int):
+        """Set frequency correction (optional)."""
+        if not self.writer:
+            return
+        await self._send_cmd(0x05, ppm)
+        log.debug("Set PPM correction to %d ppm", ppm)
+
+    # ----------------------------------------------------------------------
+    # IQ reading
+    # ----------------------------------------------------------------------
     async def read_iq(self, size: int = 16384) -> bytes:
-        """Read IQ samples."""
+        """Read raw IQ samples from rtl_tcp stream."""
         if not self.reader:
             return b""
         try:
-            return await self.reader.readexactly(size)
+            data = await self.reader.read(size)
+            return data
         except asyncio.IncompleteReadError:
             log.warning("rtl_tcp read incomplete.")
+            return b""
+        except Exception as e:
+            log.error("rtl_tcp read error: %s", e)
+            await self.close()
             return b""
