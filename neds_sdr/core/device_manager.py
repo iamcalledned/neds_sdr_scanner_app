@@ -1,4 +1,7 @@
-"""DeviceManager for runtime (live) SDR detection and TCP management.
+"""
+device_manager.py
+
+DeviceManager for runtime (live) SDR detection and TCP management.
 
 Features:
 - detect_sdr_devices(): discover attached RTL-SDR USB devices (pyrtlsdr preferred,
@@ -29,42 +32,24 @@ try:
 except Exception:
     _HAVE_PYRTLSDR = False
 
-# Import receiver lazily to avoid circular imports in some run paths
+# Import receiver lazily to avoid circular imports
 from neds_sdr.core.receiver import SDRReceiver  # noqa: E402
 
 
 class DeviceManager:
     def __init__(self, event_bus):
         self.event_bus = event_bus
-
-        # usb_devices: list of dicts: {'index': int, 'description': str}
         self.usb_devices: List[Dict] = []
-
-        # tcp_servers: map port -> dict {proc: Process|None, device_index: Optional[int], status: str}
-        # If we started the server ourselves, proc is the process handle and device_index is the hardware index.
-        # If the server was found via tcp_scan, proc is None and device_index may be None (unknown).
         self.tcp_servers: Dict[int, Dict] = {}
-
-        # receivers: active SDRReceiver objects created by 'attach_tcp' or 'create_receiver'
         self.receivers: Dict[str, SDRReceiver] = {}
-
-        # default tcp scan port range (inclusive)
         self.tcp_scan_ports = list(range(1234, 1237))
-
-        # process bookkeeping: map device_index -> process handle (if started by us)
         self._started_procs: Dict[int, asyncio.subprocess.Process] = {}
 
     # -------------------------
     # USB Detection
     # -------------------------
     def detect_sdr_devices(self) -> List[Dict]:
-        """
-        Return a list of attached RTL-SDR devices as dicts:
-            [{'index': 0, 'description': 'RTL-SDR Blog V4 ...'}, ...]
-        Tries pyrtlsdr first, falls back to parsing `rtl_test -t` output.
-        """
         devices = []
-        # Option A: pyrtlsdr
         if _HAVE_PYRTLSDR:
             try:
                 serials = RtlSdr.get_device_serial_addresses()
@@ -77,7 +62,6 @@ class DeviceManager:
             except Exception as e:
                 log.debug("DeviceManager: pyrtlsdr detection failed: %s", e)
 
-        # Option B: rtl_test -t fallback
         rtl_test_path = shutil.which("rtl_test")
         if not rtl_test_path:
             log.warning("DeviceManager: rtl_test not found on PATH and pyrtlsdr not available.")
@@ -87,11 +71,6 @@ class DeviceManager:
         try:
             proc = asyncio.run(self._run_blocking_cmd([rtl_test_path, "-t"], timeout=6))
             out = proc.stdout or ""
-            # parse "Found N device(s):" and each device line that contains index and description
-            # rtl_test's output varies; attempt to extract indices and descriptions robustly.
-            # Example lines:
-            #   Found 1 device(s):
-            #     0:  Realtek, RTL2838UHIDIR, SN: 00000001
             lines = out.splitlines()
             dev_lines = [l.strip() for l in lines if re.match(r"^\s*\d+:\s+", l)]
             for line in dev_lines:
@@ -109,7 +88,6 @@ class DeviceManager:
             return []
 
     async def _run_shell_cmd(self, argv: List[str], timeout: int = 6) -> asyncio.subprocess.Process:
-        """Async helper to run a subprocess and return the Process handle (with stdout/stderr pipes)."""
         proc = await asyncio.create_subprocess_exec(
             *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
@@ -119,17 +97,11 @@ class DeviceManager:
             proc.kill()
             await proc.wait()
             raise
-        # Attach decoded output to proc attributes for synchronous fallback compatibility
-        proc.stdout = stdout.decode(errors="ignore") if isinstance(stdout, bytes) else str(stdout)
-        proc.stderr = stderr.decode(errors="ignore") if isinstance(stderr, bytes) else str(stderr)
+        proc.stdout = stdout.decode(errors="ignore")
+        proc.stderr = stderr.decode(errors="ignore")
         return proc
 
     def _run_blocking_cmd(self, argv: List[str], timeout: int = 6) -> asyncio.subprocess.Process:
-        """
-        Blocking wrapper using asyncio.run for simple commands from sync code paths.
-        Returns a dummy Process-like object with .stdout and .stderr (decoded strings).
-        """
-        # small wrapper to call the async routine
         async def _coro():
             p = await self._run_shell_cmd(argv, timeout=timeout)
             return p
@@ -175,56 +147,48 @@ class DeviceManager:
     # Start rtl_tcp for a USB device
     # -------------------------
     async def start_rtl_tcp(self, device_index: int, port: int) -> Optional[asyncio.subprocess.Process]:
-        """
-        Start rtl_tcp for the given device index on the given port.
-        Returns the Process handle on success, or None on failure.
-        """
         rtl_tcp_path = shutil.which("rtl_tcp")
         if not rtl_tcp_path:
             log.error("DeviceManager: rtl_tcp binary not found on PATH.")
             return None
 
-        # Make sure device_index is a valid int
         try:
             dev_idx = int(device_index)
         except Exception:
             log.error("DeviceManager: invalid device index: %s", device_index)
             return None
 
-        # Launch rtl_tcp as an async subprocess
         argv = [rtl_tcp_path, "-a", "127.0.0.1", "-p", str(port), "-d", str(dev_idx)]
         log.info("DeviceManager: launching rtl_tcp: %s", " ".join(argv))
         proc = await asyncio.create_subprocess_exec(
             *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
 
-        # store bookkeeping (proc may not be immediately ready to accept connections)
         self.tcp_servers[port] = {"proc": proc, "device_index": dev_idx, "status": "starting"}
         self._started_procs[dev_idx] = proc
 
-        # wait briefly and check if the process is still running
         await asyncio.sleep(0.5)
         if proc.returncode is not None:
-            # process finished quickly (error)
             stdout, stderr = await proc.communicate()
             log.error("DeviceManager: rtl_tcp exited early. stdout=%s stderr=%s", stdout, stderr)
             self.tcp_servers[port]["status"] = "exited"
             return None
 
-        # mark running; higher-level UI will probe port to ensure connectivity
         self.tcp_servers[port]["status"] = "running"
         log.info("DeviceManager: rtl_tcp launched on port %d (device %d).", port, dev_idx)
         return proc
 
     # -------------------------
-    # Attach to an existing rtl_tcp server (create receiver)
+    # Attach to an existing rtl_tcp server
     # -------------------------
-    def attach_tcp(self, host: str, port: int, name: Optional[str] = None,
-                gain: float = 30.0, auto_connect: bool = False) -> Optional[SDRReceiver]:
-        """
-        Create and register an SDRReceiver placeholder. If auto_connect is True,
-        schedule receiver.connect() in the background and update status.
-        """
+    def attach_tcp(
+        self,
+        host: str,
+        port: int,
+        name: Optional[str] = None,
+        gain: float = 30.0,
+        auto_connect: bool = False,
+    ) -> Optional[SDRReceiver]:
         hostname = host or "127.0.0.1"
         try:
             port = int(port)
@@ -243,76 +207,66 @@ class DeviceManager:
             receiver = SDRReceiver(name=name, host=hostname, port=port, gain=gain, event_bus=self.event_bus)
             self.receivers[name] = receiver
             self.tcp_servers.setdefault(port, {"proc": None, "device_index": None, "status": "found"})
-
             log.info("DeviceManager: created receiver placeholder %s -> %s:%d", name, hostname, port)
 
             if auto_connect:
-                # Schedule background connect — don't block caller.
-                # We create a task and keep a ref on the receiver if desired.
                 async def _try_connect():
                     try:
                         await receiver.connect()
-                        # update status and emit event on success
                         self.tcp_servers[port]["status"] = "connected"
                         self.event_bus.emit("receiver_connected", {"name": name, "port": port})
                         log.info("DeviceManager: receiver %s connected to %s:%d", name, hostname, port)
                     except Exception as e:
                         log.error("DeviceManager: auto-connect failed for %s:%d: %s", hostname, port, e)
                         self.tcp_servers[port]["status"] = "connect_failed"
-                        # optionally emit a failure event
-                        self.event_bus.emit("receiver_connect_failed", {"name": name, "port": port, "error": str(e)})
+                        self.event_bus.emit(
+                            "receiver_connect_failed", {"name": name, "port": port, "error": str(e)}
+                        )
 
-                # caller must ensure we are on an asyncio-aware loop; create_task will use current loop
                 try:
                     asyncio.get_event_loop().create_task(_try_connect())
                 except RuntimeError:
-                    # no running loop; try to spawn new loop in a thread or log error
-                    log.warning("No running asyncio loop; auto_connect requested but cannot schedule task.")
+                    log.warning("No running asyncio loop; cannot schedule auto_connect task.")
+
             return receiver
         except Exception as e:
             log.error("DeviceManager.attach_tcp failed: %s", e)
             return None
+
     # -------------------------
-    # UI convenience property
+    # UI Compatibility Property
     # -------------------------
     @property
-    def dongles(self):
-        """Return a unified list of SDR dongles (USB + active TCP receivers)."""
-        result = []
-        # Include connected TCP receivers
-        for name, recv in self.receivers.items():
-            result.append({
-                "name": name,
-                "type": "tcp",
-                "host": recv.host,
-                "port": recv.port,
-                "gain": recv.gain,
-                "running": recv.running,
-            })
-        # Include detected USB hardware
-        for dev in self.usb_devices:
-            result.append({
-                "name": f"usb_{dev['index']}",
-                "type": "usb",
-                "description": dev["description"],
-                "index": dev["index"],
-            })
-        return result
+    def dongles(self) -> Dict[str, object]:
+        """
+        Return a dict for UI (name -> SDRReceiver or info object).
+        This ensures tcp_tab.py can safely call dongles.items().
+        """
+        result = {}
 
+        for name, recv in self.receivers.items():
+            result[name] = recv
+
+        for dev in self.usb_devices:
+            name = f"usb_{dev['index']}"
+            result[name] = {
+                "index": dev["index"],
+                "description": dev.get("description", "RTL-SDR device"),
+                "type": "usb",
+            }
+
+        return result
 
     # -------------------------
     # Shutdown helpers
     # -------------------------
     async def shutdown(self):
-        """Shutdown any started rtl_tcp processes and disconnect receivers."""
-        # First stop receivers
         for rname, r in list(self.receivers.items()):
             try:
                 await r.disconnect()
             except Exception:
                 pass
 
-        # Kill processes we started
         for dev_idx, proc in list(self._started_procs.items()):
             try:
                 if proc.returncode is None:
@@ -326,3 +280,4 @@ class DeviceManager:
         self.tcp_servers.clear()
         self.usb_devices.clear()
         self.receivers.clear()
+        log.info("DeviceManager: shutdown complete.")
