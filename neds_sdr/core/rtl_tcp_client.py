@@ -107,17 +107,19 @@ class RTL_TCP_Client:
     # ----------------------------------------------------------------------
     # IQ reading
     # ----------------------------------------------------------------------
+    # rtl_tcp_client.py – only the read_iq change shown
+
     async def read_iq(self, size: int = 16384) -> bytes:
-        """Read raw IQ samples from rtl_tcp stream."""
         if not self.reader:
             return b""
         try:
-            data = await self.reader.read(size)
-            return data
+            return await self.reader.readexactly(size)
         except asyncio.IncompleteReadError:
-            log.warning("rtl_tcp read incomplete.")
+            # server closed or EOF
+            self.connected = False
+            log.warning("rtl_tcp EOF / incomplete read; marking disconnected.")
             return b""
-        except Exception as e:
-            log.error("rtl_tcp read error: %s", e)
-            await self.close()
+        except (ConnectionResetError, BrokenPipeError) as e:
+            self.connected = False
+            log.warning("rtl_tcp socket error: %s; marking disconnected.", e)
             return b""

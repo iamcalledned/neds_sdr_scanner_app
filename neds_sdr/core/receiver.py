@@ -113,17 +113,14 @@ class SDRReceiver:
     # -------------------------------------------------------------------------
 
     async def _rx_loop(self):
-        """Continuously read IQ data from rtl_tcp and dispatch to channels."""
         log.info("[%s] Receiver loop started.", self.name)
         buffer_size = 16384
-
         try:
             while self.running and self.client.connected:
                 iq_bytes = await self.client.read_iq(buffer_size)
                 if not iq_bytes:
                     await asyncio.sleep(0.05)
                     continue
-
                 iq = np.frombuffer(iq_bytes, dtype=np.uint8).astype(np.float32)
                 iq = (iq - 127.5) / 127.5
 

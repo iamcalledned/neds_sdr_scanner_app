@@ -1,13 +1,13 @@
+# __main__.py
 """
-__main__.py — Entry point for Neds SDR app
-Fully async-safe version: allows TCP connect + GUI to stay alive.
+Entry: run a single qasync loop; show Startup non-blocking; then show main UI.
 """
 
 import sys
 import asyncio
 import logging
 from PyQt6 import QtWidgets
-from qasync import QEventLoop, asyncSlot, run as qasync_run
+from qasync import QEventLoop, run, wait_signal
 
 from neds_sdr.core.event_bus import EventBus
 from neds_sdr.core.device_manager import DeviceManager
@@ -16,45 +16,32 @@ from neds_sdr.ui.startup import StartupDialog
 
 
 async def main():
-    """Async startup and main UI logic."""
     logging.basicConfig(level=logging.INFO)
     log = logging.getLogger("Main")
+
+    app = QtWidgets.QApplication(sys.argv)
+    loop = QEventLoop(app)
+    asyncio.set_event_loop(loop)
 
     event_bus = EventBus()
     device_manager = DeviceManager(event_bus)
 
-    # Create the startup dialog
+    # Show StartupDialog *non-blocking*
     startup = StartupDialog(device_manager)
-
-    # Show the startup dialog asynchronously
-    fut = asyncio.get_event_loop().create_future()
-
-    def on_done(result):
-        if not fut.done():
-            fut.set_result(result)
-
-    startup.finished.connect(on_done)
+    startup.setModal(True)
     startup.show()
 
-    # Wait for the dialog to finish (non-blocking)
-    result = await fut
+    # Let all async tasks (like receiver.connect()) run while dialog is open.
+    await wait_signal(startup.finished)
 
-    if result == QtWidgets.QDialog.DialogCode.Accepted:
-        ui = UIController(device_manager, None, event_bus)
-        ui.show()
-        log.info("Neds SDR Control UI launched and running.")
-    else:
-        log.info("Startup canceled. Exiting app.")
-        QtWidgets.QApplication.quit()
+    # Now show the main UI
+    ui = UIController(device_manager, None, event_bus)
+    ui.show()
+    log.info("Neds SDR Control UI launched and running.")
 
-
-def main_entry():
-    """Start Qt+async event loop together (no blocking)."""
-    app = QtWidgets.QApplication(sys.argv)
-
-    # Use qasync to manage the event loop
-    qasync_run(main())
+    # Keep the app alive forever; Ctrl+C or window close will exit.
+    await asyncio.Future()
 
 
 if __name__ == "__main__":
-    main_entry()
+    run(main())
