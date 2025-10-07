@@ -1,13 +1,13 @@
-# __main__.py
 """
-Entry: run a single qasync loop; show Startup non-blocking; then show main UI.
+__main__.py — Entry point for Neds SDR Control.
+Runs startup dialog non-blocking, then launches main UI.
 """
 
 import sys
 import asyncio
 import logging
 from PyQt6 import QtWidgets
-from qasync import QEventLoop, run, wait_signal
+from qasync import QEventLoop, asyncSlot, run
 
 from neds_sdr.core.event_bus import EventBus
 from neds_sdr.core.device_manager import DeviceManager
@@ -26,21 +26,29 @@ async def main():
     event_bus = EventBus()
     device_manager = DeviceManager(event_bus)
 
-    # Show StartupDialog *non-blocking*
+    # --- show startup dialog ---
     startup = StartupDialog(device_manager)
-    startup.setModal(True)
+
+    done_future = asyncio.get_event_loop().create_future()
+
+    @asyncSlot()
+    async def on_finished(result):
+        """Called when startup dialog closes."""
+        if not done_future.done():
+            done_future.set_result(result)
+
+    startup.finished.connect(on_finished)
     startup.show()
 
-    # Let all async tasks (like receiver.connect()) run while dialog is open.
-    await wait_signal(startup.finished)
+    # Wait for dialog to finish
+    await done_future
 
-    # Now show the main UI
+    # --- show main UI ---
     ui = UIController(device_manager, None, event_bus)
     ui.show()
     log.info("Neds SDR Control UI launched and running.")
 
-    # Keep the app alive forever; Ctrl+C or window close will exit.
-    await asyncio.Future()
+    await asyncio.Future()  # keep running forever
 
 
 if __name__ == "__main__":
