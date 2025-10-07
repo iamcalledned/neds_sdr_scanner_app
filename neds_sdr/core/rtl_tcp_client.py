@@ -71,7 +71,7 @@ class RTL_TCP_Client:
         if not self.writer:
             return
         await self._send_cmd(0x01, int(freq_hz))
-        # FIX: Add a small delay to ensure rtl_tcp processes the command before others start.
+        # FIX: Delay added in previous step.
         await asyncio.sleep(0.01) 
         log.debug("Set frequency to %.4f MHz", freq_hz / 1e6)
 
@@ -80,6 +80,8 @@ class RTL_TCP_Client:
         if not self.writer:
             return
         await self._send_cmd(0x02, int(sample_rate))
+        # FIX: Add a small delay to prevent command race conditions.
+        await asyncio.sleep(0.01)
         log.debug("Set sample rate to %d Hz", sample_rate)
 
     async def set_gain(self, gain_db: float):
@@ -89,6 +91,8 @@ class RTL_TCP_Client:
         # rtl_tcp expects tenths of a dB as a 32-bit signed int
         gain_val = int(round(gain_db * 10))
         await self._send_cmd(0x04, gain_val)
+        # FIX: Add a small delay to prevent command race conditions.
+        await asyncio.sleep(0.01)
         log.debug("Set gain to %.1f dB (encoded %d)", gain_db, gain_val)
 
     async def set_ppm_correction(self, ppm: int):
@@ -96,6 +100,8 @@ class RTL_TCP_Client:
         if not self.writer:
             return
         await self._send_cmd(0x05, int(ppm))
+        # Add a small delay for good measure.
+        await asyncio.sleep(0.01)
         log.debug("Set PPM correction to %d ppm", ppm)
 
     # ----------------------------------------------------------------------
