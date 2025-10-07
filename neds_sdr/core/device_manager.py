@@ -186,7 +186,7 @@ class DeviceManager:
         host: str,
         port: int,
         name: Optional[str] = None,
-        gain: float = 30.0,
+        gain: float = 29.7,
         auto_connect: bool = False,
     ) -> Optional[SDRReceiver]:
         hostname = host or "127.0.0.1"
