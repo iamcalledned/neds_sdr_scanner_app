@@ -1,210 +1,128 @@
 """
-device_manager.py
-
-DeviceManager for runtime (live) SDR detection and TCP management.
-
-Features:
-- detect_sdr_devices(): discover attached RTL-SDR USB devices (pyrtlsdr preferred,
-  fallback to rtl_test parsing).
-- tcp_scan(): scan localhost ports for listening rtl_tcp servers.
-- start_rtl_tcp(device_index, port): start rtl_tcp subprocess for a device index.
-- attach_tcp(port, name): create and register an SDRReceiver attached to a running rtl_tcp.
-- maintains:
-    self.usb_devices -> list of {index, description}
-    self.tcp_servers -> dict port -> {'proc':Proc or None, 'device_index':int|None, 'status':str}
-    self.receivers -> dict name -> SDRReceiver
+tcp_tab.py
+Dongle management and live control interface for Neds SDR Control.
 """
 
+from PyQt6 import QtWidgets, QtGui, QtCore
 import asyncio
-import logging
-import socket
-import shutil
-import re
-from typing import List, Dict, Optional
-
-log = logging.getLogger("DeviceManager")
-
-try:
-    from rtlsdr import RtlSdr  # type: ignore
-    _HAVE_PYRTLSDR = True
-except Exception:
-    _HAVE_PYRTLSDR = False
-
-from neds_sdr.core.receiver import SDRReceiver  # noqa: E402
 
 
-class DeviceManager:
-    def __init__(self, event_bus):
-        self.event_bus = event_bus
-        self.usb_devices: List[Dict] = []
-        self.tcp_servers: Dict[int, Dict] = {}
-        self.receivers: Dict[str, SDRReceiver] = {}
-        self.tcp_scan_ports = list(range(1234, 1240))
-        self._started_procs: Dict[int, asyncio.subprocess.Process] = {}
+class TcpTab(QtWidgets.QWidget):
+    """Displays SDR dongles, allows connection control and gain adjustment."""
 
-    # -------------------------------------------------------------------------
-    # USB Detection
-    # -------------------------------------------------------------------------
-    def detect_sdr_devices(self) -> List[Dict]:
-        devices = []
-        if _HAVE_PYRTLSDR:
-            try:
-                serials = RtlSdr.get_device_serial_addresses()
-                for idx, serial in enumerate(serials):
-                    devices.append({"index": idx, "description": f"RTL-SDR (serial={serial})"})
-                self.usb_devices = devices
-                log.info("DeviceManager: Found %d device(s) via pyrtlsdr.", len(devices))
-                return devices
-            except Exception as e:
-                log.warning("DeviceManager: pyrtlsdr detection failed: %s", e)
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+        self.layout = QtWidgets.QVBoxLayout(self)
 
-        rtl_test_path = shutil.which("rtl_test")
-        if not rtl_test_path:
-            log.warning("DeviceManager: rtl_test not found.")
-            return []
+        title = QtWidgets.QLabel("Active SDR Dongles")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; margin-bottom: 8px;")
+        self.layout.addWidget(title)
 
-        try:
-            proc = asyncio.run(self._run_blocking_cmd([rtl_test_path, "-t"], timeout=6))
-            out = proc.stdout or ""
-            lines = out.splitlines()
-            for line in lines:
-                m = re.match(r"^(\d+):\s*(.+)$", line.strip())
-                if m:
-                    idx, desc = int(m.group(1)), m.group(2)
-                    devices.append({"index": idx, "description": desc})
-            self.usb_devices = devices
-            log.info("DeviceManager: Detected %d SDR device(s).", len(devices))
-        except Exception as e:
-            log.error("DeviceManager: error while running rtl_test: %s", e)
-        return devices
-
-    async def _run_shell_cmd(self, argv: List[str], timeout: int = 6) -> asyncio.subprocess.Process:
-        proc = await asyncio.create_subprocess_exec(
-            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        # --- Table setup ---
+        self.table = QtWidgets.QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(
+            ["Name", "Host", "Port", "Gain (dB)", "Status", "Connect", "Disconnect"]
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise
-        proc.stdout = stdout.decode(errors="ignore")
-        proc.stderr = stderr.decode(errors="ignore")
-        return proc
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.layout.addWidget(self.table)
 
-    def _run_blocking_cmd(self, argv: List[str], timeout: int = 6):
-        async def _coro():
-            return await self._run_shell_cmd(argv, timeout=timeout)
-        return asyncio.run(_coro())
+        # --- Add Dongle Form ---
+        form = QtWidgets.QHBoxLayout()
+        self.name_input = QtWidgets.QLineEdit()
+        self.name_input.setPlaceholderText("Dongle name")
+        self.host_input = QtWidgets.QLineEdit("127.0.0.1")
+        self.port_input = QtWidgets.QLineEdit("1234")
+        self.gain_input = QtWidgets.QLineEdit("30")
+        add_button = QtWidgets.QPushButton("Add Dongle")
+        add_button.clicked.connect(self.add_dongle)
+        form.addWidget(self.name_input)
+        form.addWidget(self.host_input)
+        form.addWidget(self.port_input)
+        form.addWidget(self.gain_input)
+        form.addWidget(add_button)
+        self.layout.addLayout(form)
 
-    # -------------------------------------------------------------------------
-    # TCP Scanning
-    # -------------------------------------------------------------------------
-    def tcp_scan(self, ports: Optional[List[int]] = None, host: str = "127.0.0.1", timeout: float = 0.25) -> List[int]:
-        if ports is None:
-            ports = self.tcp_scan_ports
-        open_ports = []
-        for p in ports:
-            try:
-                with socket.create_connection((host, p), timeout=timeout) as s:
-                    banner = ""
-                    try:
-                        s.settimeout(0.1)
-                        banner = s.recv(128).decode(errors="ignore")
-                    except Exception:
-                        pass
-                    if "rtl" in banner.lower() or banner == "":
-                        open_ports.append(p)
-                        if p not in self.tcp_servers:
-                            self.tcp_servers[p] = {"proc": None, "device_index": None, "status": "found"}
-            except Exception:
-                continue
-        log.info("DeviceManager: tcp_scan found %d open rtl_tcp port(s): %s", len(open_ports), open_ports)
-        return open_ports
+        # Initial population
+        self.refresh_table()
 
-    # -------------------------------------------------------------------------
-    # Start and Attach
-    # -------------------------------------------------------------------------
-    async def start_rtl_tcp(self, device_index: int, port: int):
-        rtl_tcp_path = shutil.which("rtl_tcp")
-        if not rtl_tcp_path:
-            log.error("DeviceManager: rtl_tcp not found on PATH.")
-            return None
-        argv = [rtl_tcp_path, "-a", "127.0.0.1", "-p", str(port), "-d", str(device_index)]
-        proc = await asyncio.create_subprocess_exec(*argv)
-        await asyncio.sleep(0.3)
-        self.tcp_servers[port] = {"proc": proc, "device_index": device_index, "status": "running"}
-        log.info("DeviceManager: rtl_tcp started on port %d", port)
-        return proc
+        # Auto refresh
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.refresh_table)
+        self.timer.start(3000)
 
-    def attach_tcp(self, host: str, port: int, name: Optional[str] = None, gain: float = 30.0):
-        hostname = host or "127.0.0.1"
-        port = int(port)
-        if not name:
-            name = f"tcp_{hostname.replace('.', '_')}_{port}"
-        if name in self.receivers:
-            return self.receivers[name]
-        try:
-            receiver = SDRReceiver(name, hostname, port, gain, self.event_bus)
-            self.receivers[name] = receiver
-            log.info("DeviceManager: created receiver %s -> %s:%d", name, hostname, port)
-            return receiver
-        except Exception as e:
-            log.error("DeviceManager.attach_tcp failed: %s", e)
-            return None
+    # ------------------------------------------------------------------
+    def refresh_table(self):
+        """Refresh dongle list from backend."""
+        dongles = self.app.device_manager.dongles
+        self.table.setRowCount(len(dongles))
 
-    # -------------------------------------------------------------------------
-    # UI Convenience / Compatibility
-    # -------------------------------------------------------------------------
-    @property
-    def dongles(self):
-        """Return a dict for UI (name -> SDRReceiver or device info)."""
-        result = {}
-        for name, recv in self.receivers.items():
-            result[name] = recv
-        for dev in self.usb_devices:
-            name = f"usb_{dev['index']}"
-            result[name] = {"index": dev["index"], "description": dev.get("description", ""), "type": "usb"}
-        return result
+        for row, (name, receiver) in enumerate(dongles.items()):
+            self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(name))
 
-    async def add_dongle(self, name: str, host: str, port: int, gain: float):
-        """Add and attach new SDRReceiver by host:port."""
-        if name in self.receivers:
-            log.warning("DeviceManager.add_dongle: %s already exists", name)
-            return self.receivers[name]
-        recv = self.attach_tcp(host, port, name=name, gain=gain)
-        if recv:
-            await recv.connect()
-            log.info("DeviceManager: Added dongle %s (%s:%d)", name, host, port)
-        return recv
+            # These next three fields depend on whether it's a receiver or USB info dict
+            host = getattr(receiver, "host", "-")
+            port = getattr(receiver, "port", "-")
+            gain_val = getattr(receiver, "gain", 0)
 
-    async def set_gain(self, name: str, gain: float):
-        """Set gain live for a receiver."""
-        recv = self.receivers.get(name)
-        if not recv:
-            return
-        recv.gain = gain
-        try:
-            await recv.client.set_gain(gain)
-            log.info("[%s] gain -> %.1f dB", name, gain)
-        except Exception as e:
-            log.error("DeviceManager.set_gain error: %s", e)
+            self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(host)))
+            self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(str(port)))
 
-    # -------------------------------------------------------------------------
-    # Shutdown
-    # -------------------------------------------------------------------------
-    async def shutdown(self):
-        """Cleanly shut down all receivers and processes."""
-        for r in list(self.receivers.values()):
-            try:
-                await r.disconnect()
-            except Exception:
-                pass
-        for dev_idx, proc in list(self._started_procs.items()):
-            if proc and proc.returncode is None:
-                proc.terminate()
-                await proc.wait()
-        self.receivers.clear()
-        self.usb_devices.clear()
-        self.tcp_servers.clear()
-        log.info("DeviceManager: shutdown complete.")
+            # Gain slider
+            gain_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+            gain_slider.setMinimum(0)
+            gain_slider.setMaximum(50)
+            gain_slider.setValue(int(gain_val))
+            gain_slider.valueChanged.connect(
+                lambda val, n=name: asyncio.create_task(self.set_gain(n, val))
+            )
+            self.table.setCellWidget(row, 3, gain_slider)
+
+            # Status
+            running = getattr(receiver, "running", False)
+            status_text = "Connected" if running else "Offline"
+            status_item = QtWidgets.QTableWidgetItem(status_text)
+            status_item.setForeground(QtGui.QColor("green" if running else "red"))
+            self.table.setItem(row, 4, status_item)
+
+            # Connect button
+            connect_btn = QtWidgets.QPushButton("Connect")
+            connect_btn.clicked.connect(lambda _, n=name: asyncio.create_task(self.connect_dongle(n)))
+            self.table.setCellWidget(row, 5, connect_btn)
+
+            # Disconnect button
+            disconnect_btn = QtWidgets.QPushButton("Disconnect")
+            disconnect_btn.clicked.connect(lambda _, n=name: asyncio.create_task(self.disconnect_dongle(n)))
+            self.table.setCellWidget(row, 6, disconnect_btn)
+
+    # ------------------------------------------------------------------
+    def add_dongle(self):
+        """Add new dongle from input form."""
+        name = self.name_input.text().strip()
+        host = self.host_input.text().strip()
+        port = int(self.port_input.text())
+        gain = float(self.gain_input.text())
+        self.app.log_tab.append_log(f"[UI] Adding dongle {name} ({host}:{port}) gain={gain}")
+        asyncio.create_task(self.app.device_manager.add_dongle(name, host, port, gain))
+        self.refresh_table()
+
+    async def set_gain(self, name: str, gain: int):
+        """Adjust gain live."""
+        await self.app.device_manager.set_gain(name, gain)
+        self.app.log_tab.append_log(f"[UI] Set {name} gain → {gain} dB")
+
+    async def connect_dongle(self, name: str):
+        """Connect dongle live."""
+        d = self.app.device_manager.dongles.get(name)
+        if d and not getattr(d, "running", False):
+            await d.connect()
+            self.app.log_tab.append_log(f"[UI] Connected dongle {name}")
+            self.refresh_table()
+
+    async def disconnect_dongle(self, name: str):
+        """Disconnect dongle live."""
+        d = self.app.device_manager.dongles.get(name)
+        if d and getattr(d, "running", False):
+            await d.disconnect()
+            self.app.log_tab.append_log(f"[UI] Disconnected dongle {name}")
+            self.refresh_table()
