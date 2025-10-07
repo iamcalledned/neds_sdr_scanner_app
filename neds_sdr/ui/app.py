@@ -1,188 +1,87 @@
 """
-sdr_tab.py
-Channels management and tuning tab for Ned's SDR Control UI.
+app.py
+
+Main window and controller for Ned's SDR Control UI.
+
+This module defines UIController, the top-level Qt window that
+coordinates the various control tabs (dongles, channels, sinks, logs, system).
+It wires up the backend event bus to the UI and provides helper methods
+used by the tabs.
 """
 
+from __future__ import annotations
 import asyncio
-from PyQt6 import QtWidgets, QtCore
+from typing import Optional, Any
+from PyQt6 import QtWidgets, QtGui, QtCore
 
+# Import tab implementations
+from .tabs.tcp_tab import TcpTab
+from .tabs.sdr_tab import SdrTab
+from .tabs.sink_tab import SinkTab
+from .tabs.log_tab import LogTab
+from .tabs.system_tab import SystemTab
 
-class SdrTab(QtWidgets.QWidget):
-    """UI tab for managing SDR channel presets and live tuning."""
+class UIController(QtWidgets.QMainWindow):
+    """Top‑level application window.
 
-    def __init__(self, main_window):
-        super().__init__(main_window)
-        self.main = main_window
-        self.device_manager = main_window.device_manager
-        self.event_bus = main_window.event_bus
+    UIController constructs the main tabbed interface,
+    exposes references to each tab, and subscribes to backend events.
+    """
 
-        self._setup_ui()
-        self._connect_signals()
+    def __init__(self, device_manager, config_manager: Optional[Any], event_bus,
+                 parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self.device_manager = device_manager
+        self.config_manager = config_manager
+        self.event_bus = event_bus
 
-        self.current_receiver = None
-        self.refresh_receivers()
+        self.setWindowTitle("Ned's SDR Control")
+        self.resize(1024, 768)
 
-        # Subscribe to backend updates
-        self.event_bus.subscribe("receiver_created", self._on_receiver_event)
-        self.event_bus.subscribe("receiver_connected", self._on_receiver_event)
-        self.event_bus.subscribe("channel_presets_updated", self._on_presets_updated)
+        # Central tab widget
+        self.tabs = QtWidgets.QTabWidget()
+        self.setCentralWidget(self.tabs)
 
-    # ------------------------------------------------------------------
-    # UI Construction
-    # ------------------------------------------------------------------
-    def _setup_ui(self):
-        layout = QtWidgets.QVBoxLayout(self)
+        # Instantiate tabs, passing self so tabs can access device_manager, log_tab, etc.
+        self.tcp_tab = TcpTab(self)
+        self.sdr_tab = SdrTab(self)
+        self.sink_tab = SinkTab(self)
+        self.log_tab = LogTab(self)
+        self.system_tab = SystemTab(self)
 
-        # --- Receiver selection ---
-        recv_layout = QtWidgets.QHBoxLayout()
-        recv_layout.addWidget(QtWidgets.QLabel("Receiver:"))
-        self.receiver_combo = QtWidgets.QComboBox()
-        recv_layout.addWidget(self.receiver_combo)
-        layout.addLayout(recv_layout)
+        # Add tabs
+        self.tabs.addTab(self.tcp_tab, "Dongles")
+        self.tabs.addTab(self.sdr_tab, "Channels")
+        self.tabs.addTab(self.sink_tab, "Sinks")
+        self.tabs.addTab(self.log_tab, "Logs")
+        self.tabs.addTab(self.system_tab, "System")
 
-        # --- Preset list ---
-        self.preset_list = QtWidgets.QListWidget()
-        layout.addWidget(QtWidgets.QLabel("Channel Presets:"))
-        layout.addWidget(self.preset_list)
+        # Subscribe to backend events
+        if self.event_bus is not None:
+            # When receivers are created or connected, refresh dongle/channel tables
+            self.event_bus.subscribe("receiver_created",
+                                     lambda data: self._refresh())
+            self.event_bus.subscribe("receiver_connected",
+                                     lambda data: self._refresh())
+            # When channel presets change or signal-power updates come in, update SdrTab
+            self.event_bus.subscribe("channel_presets_updated",
+                                     lambda data: self.sdr_tab.refresh_table())
+            self.event_bus.subscribe("signal_power", self.sdr_tab.update_signal)
 
-        # --- Channel configuration ---
-        form = QtWidgets.QFormLayout()
-        self.name_input = QtWidgets.QLineEdit()
-        self.freq_input = QtWidgets.QDoubleSpinBox()
-        self.freq_input.setRange(0.01, 3000.0)
-        self.freq_input.setDecimals(6)
-        self.gain_input = QtWidgets.QSpinBox()
-        self.gain_input.setRange(0, 60)
-        self.squelch_input = QtWidgets.QSpinBox()
-        self.squelch_input.setRange(-120, 0)
-        self.squelch_input.setValue(-50)
-        self.tone_type_combo = QtWidgets.QComboBox()
-        self.tone_type_combo.addItems(["None", "PL", "DPL"])
-        self.tone_value_input = QtWidgets.QDoubleSpinBox()
-        self.tone_value_input.setRange(0.0, 300.0)
-        self.tone_value_input.setDecimals(1)
-        self.sink_input = QtWidgets.QLineEdit("default")
+    def _refresh(self):
+        """Refresh UI when receivers appear or connect."""
+        self.tcp_tab.refresh_table()
+        self.sdr_tab.refresh_table()
 
-        form.addRow("Name:", self.name_input)
-        form.addRow("Freq (MHz):", self.freq_input)
-        form.addRow("Gain (dB):", self.gain_input)
-        form.addRow("Squelch (dB):", self.squelch_input)
-        form.addRow("Tone Type:", self.tone_type_combo)
-        form.addRow("Tone Value:", self.tone_value_input)
-        form.addRow("Sink:", self.sink_input)
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        """Gracefully shut down the backend when the window closes."""
+        if hasattr(self.device_manager, "shutdown"):
+            try:
+                loop = asyncio.get_event_loop()
+                loop.create_task(self.device_manager.shutdown())
+            except RuntimeError:
+                # No running loop; run shutdown synchronously
+                asyncio.run(self.device_manager.shutdown())
+        super().closeEvent(event)
 
-        layout.addLayout(form)
-
-        # --- Buttons ---
-        btn_layout = QtWidgets.QHBoxLayout()
-        self.add_btn = QtWidgets.QPushButton("Add Preset")
-        self.remove_btn = QtWidgets.QPushButton("Remove Preset")
-        self.tune_btn = QtWidgets.QPushButton("Tune")
-        btn_layout.addWidget(self.add_btn)
-        btn_layout.addWidget(self.remove_btn)
-        btn_layout.addWidget(self.tune_btn)
-        layout.addLayout(btn_layout)
-
-        layout.addStretch()
-
-    # ------------------------------------------------------------------
-    # Signal connections
-    # ------------------------------------------------------------------
-    def _connect_signals(self):
-        self.receiver_combo.currentIndexChanged.connect(self._on_receiver_changed)
-        self.add_btn.clicked.connect(self._on_add_clicked)
-        self.remove_btn.clicked.connect(self._on_remove_clicked)
-        self.tune_btn.clicked.connect(self._on_tune_clicked)
-
-    # ------------------------------------------------------------------
-    # Event handlers
-    # ------------------------------------------------------------------
-    def _on_receiver_event(self, data):
-        self.refresh_receivers()
-
-    def _on_receiver_changed(self, idx):
-        if idx < 0:
-            return
-        name = self.receiver_combo.currentText()
-        self.current_receiver = self.device_manager.receivers.get(name)
-        self._refresh_presets()
-
-    def _on_presets_updated(self, data):
-        if self.current_receiver and data["dongle"] == self.current_receiver.name:
-            self._refresh_presets()
-
-    def _on_add_clicked(self):
-        """Add new preset for current receiver."""
-        if not self.current_receiver:
-            self._warn("Select a receiver first.")
-            return
-
-        name = self.name_input.text().strip()
-        if not name:
-            self._warn("Enter a channel name.")
-            return
-
-        freq_hz = self.freq_input.value() * 1e6
-        squelch = self.squelch_input.value()
-        tone_type = self.tone_type_combo.currentText()
-        tone_value = self.tone_value_input.value()
-        sink = self.sink_input.text().strip() or "default"
-
-        # Add to receiver preset manager
-        self.current_receiver.presets.add_preset(
-            name=name,
-            frequency=freq_hz,
-            squelch=squelch,
-            tone_type=None if tone_type == "None" else tone_type,
-            tone_value=tone_value if tone_type != "None" else None,
-            sink=sink,
-        )
-
-        self._refresh_presets()
-
-    def _on_remove_clicked(self):
-        item = self.preset_list.currentItem()
-        if not item or not self.current_receiver:
-            return
-        self.current_receiver.presets.remove_preset(item.text())
-        self._refresh_presets()
-
-    def _on_tune_clicked(self):
-        item = self.preset_list.currentItem()
-        if not item or not self.current_receiver:
-            return
-        name = item.text()
-        asyncio.create_task(self.current_receiver.set_channel(name))
-
-    # ------------------------------------------------------------------
-    # Refreshers
-    # ------------------------------------------------------------------
-    def refresh_receivers(self):
-        """Repopulate receiver dropdown."""
-        self.receiver_combo.clear()
-        for name in self.device_manager.receivers.keys():
-            self.receiver_combo.addItem(name)
-        if self.receiver_combo.count() > 0:
-            self.receiver_combo.setCurrentIndex(0)
-            self._on_receiver_changed(0)
-
-    def _refresh_presets(self):
-        self.preset_list.clear()
-        if not self.current_receiver:
-            return
-        presets = self.current_receiver.presets.list_presets()
-        self.preset_list.addItems(presets)
-
-    # ------------------------------------------------------------------
-    # Utilities
-    # ------------------------------------------------------------------
-    def _warn(self, msg):
-        QtWidgets.QMessageBox.warning(self, "Warning", msg)
-
-    def refresh_table(self):
-        """Compatibility method for UIController expectations."""
-        self._refresh_presets()
-
-    def update_signal(self, data):
-        """Compatibility stub: could show signal levels later."""
-        pass
+__all__ = ["UIController"]
