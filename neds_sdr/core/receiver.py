@@ -44,7 +44,9 @@ class SDRReceiver:
 
         # Configure the dongle
         await self.client.set_sample_rate(self.sample_rate)
+        await asyncio.sleep(0.05)
         await self.client.set_gain(self.gain)
+        await asyncio.sleep(0.05)
 
         # Mark running and start persistent reader loop
         self.running = True

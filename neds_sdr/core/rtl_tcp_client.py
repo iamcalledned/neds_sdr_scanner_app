@@ -60,12 +60,22 @@ class RTL_TCP_Client:
         except Exception as e:
             log.error("Failed to send cmd 0x%02X: %s", cmd, e)
             await self.close()
-
     # ----------------------------------------------------------------------
     # rtl_tcp protocol commands
     # ----------------------------------------------------------------------
+
+    import struct
+
+    async def _send_cmd(self, cmd_id: int, value: int):
+        """Send 5-byte rtl_tcp command: 1-byte ID + 4-byte big-endian integer."""
+        if not self.writer:
+            return
+        packet = struct.pack(">BI", cmd_id, int(value))
+        self.writer.write(packet)
+        await self.writer.drain()
+
     async def set_frequency(self, freq_hz: float):
-        """Set tuner center frequency."""
+        """Set tuner center frequency (Hz)."""
         if not self.writer:
             return
         await self._send_cmd(0x01, int(freq_hz))
@@ -75,21 +85,23 @@ class RTL_TCP_Client:
         """Set tuner sample rate (Hz)."""
         if not self.writer:
             return
-        await self._send_cmd(0x02, sample_rate)
+        await self._send_cmd(0x02, int(sample_rate))
         log.debug("Set sample rate to %d Hz", sample_rate)
 
     async def set_gain(self, gain_db: float):
         """Set tuner RF gain (manual mode)."""
         if not self.writer:
             return
-        await self._send_cmd(0x04, int(gain_db * 10))  # tenths of dB
-        log.debug("Set gain to %.1f dB", gain_db)
+        # rtl_tcp expects tenths of a dB as a 32-bit signed int
+        gain_val = int(round(gain_db * 10))
+        await self._send_cmd(0x04, gain_val)
+        log.debug("Set gain to %.1f dB (encoded %d)", gain_db, gain_val)
 
     async def set_ppm_correction(self, ppm: int):
-        """Set frequency correction (optional)."""
+        """Set frequency correction (ppm)."""
         if not self.writer:
             return
-        await self._send_cmd(0x05, ppm)
+        await self._send_cmd(0x05, int(ppm))
         log.debug("Set PPM correction to %d ppm", ppm)
 
     # ----------------------------------------------------------------------
