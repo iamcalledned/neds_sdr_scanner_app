@@ -49,36 +49,30 @@ class RTL_TCP_Client:
     # ----------------------------------------------------------------------
     # Core command helpers
     # ----------------------------------------------------------------------
-    async def _send_cmd(self, cmd: int, value: int):
-        """Send one rtl_tcp command (little-endian)."""
-        if not self.writer:
-            return
-        try:
-            payload = struct.pack("<BI", cmd, int(value))
-            self.writer.write(payload)
-            await self.writer.drain()
-        except Exception as e:
-            log.error("Failed to send cmd 0x%02X: %s", cmd, e)
-            await self.close()
-    # ----------------------------------------------------------------------
-    # rtl_tcp protocol commands
-    # ----------------------------------------------------------------------
-
-    import struct
-
     async def _send_cmd(self, cmd_id: int, value: int):
         """Send 5-byte rtl_tcp command: 1-byte ID + 4-byte big-endian integer."""
         if not self.writer:
             return
-        packet = struct.pack(">BI", cmd_id, int(value))
-        self.writer.write(packet)
-        await self.writer.drain()
+        try:
+            # Command payload: 1 byte ID (big-endian), 4 byte value (big-endian)
+            packet = struct.pack(">BI", cmd_id, int(value))
+            self.writer.write(packet)
+            await self.writer.drain()
+        except Exception as e:
+            log.error("Failed to send cmd 0x%02X: %s", cmd_id, e)
+            await self.close()
+
+    # ----------------------------------------------------------------------
+    # rtl_tcp protocol commands
+    # ----------------------------------------------------------------------
 
     async def set_frequency(self, freq_hz: float):
         """Set tuner center frequency (Hz)."""
         if not self.writer:
             return
         await self._send_cmd(0x01, int(freq_hz))
+        # FIX: Add a small delay to ensure rtl_tcp processes the command before others start.
+        await asyncio.sleep(0.01) 
         log.debug("Set frequency to %.4f MHz", freq_hz / 1e6)
 
     async def set_sample_rate(self, sample_rate: int):
@@ -107,8 +101,6 @@ class RTL_TCP_Client:
     # ----------------------------------------------------------------------
     # IQ reading
     # ----------------------------------------------------------------------
-    # rtl_tcp_client.py – only the read_iq change shown
-
     async def read_iq(self, size: int = 16384) -> bytes:
         if not self.reader:
             return b""
