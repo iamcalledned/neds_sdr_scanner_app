@@ -1,5 +1,5 @@
 """
-channels_tab.py
+channels_tab.py and channel.py merged - Top Halves
 Provides the Channels UI tab for adding, editing, and tuning SDR channels.
 """
 
@@ -11,6 +11,51 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
+from neds_sdr.dsp.fm_demod import fm_demodulate
+from neds_sdr.core.squelch import SquelchGate
+from neds_sdr.core.tone_detector import ToneDetector
+from neds_sdr.core.audio_output import AudioOutput
+
+
+
+class Channel:
+    def __init__(self, id, frequency, squelch=-50.0,
+                 tone_type=None, tone_value=None, sink="default",
+                 receiver=None, event_bus=None):
+        self.id = id
+        self.frequency = frequency
+        self.receiver = receiver
+        self.event_bus = event_bus
+        self.squelch = SquelchGate(threshold_db=squelch)
+        self.tone = ToneDetector(tone_type, tone_value)
+        self.audio = AudioOutput(sink)
+        self.prev_phase = 0.0
+        self.running = False
+
+    async def start(self):
+        # tune the dongle to our frequency
+        await self.receiver.client.set_frequency(self.frequency)
+        self.running = True
+
+    async def stop(self):
+        self.running = False
+        self.audio.close()
+
+    async def set_frequency(self, frequency):
+        self.frequency = frequency
+        await self.receiver.client.set_frequency(frequency)
+
+    async def process_samples(self, iq):
+        # demodulate narrowband FM
+        audio, self.prev_phase = fm_demodulate(iq, self.prev_phase)
+        # check noise squelch
+        if not self.squelch.update(audio):
+            return
+        # check tone squelch
+        if not self.tone.match(audio):
+            return
+        # play audio
+        self.audio.write(audio)
 
 class ChannelsTab(QWidget):
     """
@@ -134,9 +179,10 @@ class ChannelsTab(QWidget):
             return
         receiver = self.app.device_manager.receivers.get(self.current_dongle)
         if receiver:
-            for name in receiver.presets.list_presets():
-                item = QListWidgetItem(name)
+            for ch_id, ch in getattr(receiver, "channels", {}).items():
+                item = QListWidgetItem(f"{ch_id}  @ {ch.frequency/1e6:.4f} MHz")
                 self.preset_list.addItem(item)
+
 
     async def _do_tune(self, name):
         receiver = self.app.device_manager.receivers.get(self.current_dongle)

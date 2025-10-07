@@ -1,0 +1,21 @@
+dongles:
+  - name: tcp_127_0_0_1_1236
+    host: 127.0.0.1
+    port: 1236
+    gain: 30.0
+    channels:
+      # Channel 0: 145.500 MHz, no tone
+      - name: ch0
+        frequency: 145500000.0  # 145.5000 MHz
+        squelch: -50.0          # noise squelch threshold in dB
+        tone_type: null         # no tone squelch (None, PL or DPL)
+        tone_value: null        # tone value (e.g. CTCSS/PL freq in Hz)
+        sink: default           # audio sink (use "default" for OS default)
+
+      # Channel 1: 462.5625 MHz, PL tone 88.5 Hz
+      - name: ch1
+        frequency: 462562500.0  # 462.5625 MHz
+        squelch: -60.0
+        tone_type: "PL"         # PL or DPL for tone squelch
+        tone_value: 88.5        # CTCSS/PL 88.5 Hz
+        sink: default

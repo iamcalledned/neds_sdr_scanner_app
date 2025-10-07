@@ -11,7 +11,7 @@ import asyncio
 import logging
 import numpy as np
 from neds_sdr.core.rtl_tcp_client import RTL_TCP_Client
-#from neds_sdr.core.channel import Channel
+#from neds_sdr.core.channel import Channel # Kept commented out as in original
 from neds_sdr.core.channels_manager import ChannelsManager
 
 log = logging.getLogger("SDRReceiver")
@@ -29,7 +29,7 @@ class SDRReceiver:
         self.event_bus = event_bus
         self.sample_rate = 2_048_000  # default sample rate
         self.running = False
-        self.channels: dict[str, Channel] = {}
+        self.channels: dict[str, 'Channel'] = {} # Forward declaration of Channel type
         self._rx_task: asyncio.Task | None = None
 
         # Per-dongle preset manager
@@ -99,11 +99,17 @@ class SDRReceiver:
             log.warning("[%s] Channel %s already exists.", self.name, ch_id)
             return
 
+        # 1. Create the Channel instance, linking it to this receiver (self).
         channel = Channel(**channel_config, receiver=self, event_bus=self.event_bus)
         self.channels[ch_id] = channel
+        
+        # 2. Start the channel. This is where the call to set_frequency() now happens, 
+        # using the Channel's known frequency and its receiver's client.
         await channel.start()
+        
         self.event_bus.emit("channel_added", {"dongle": self.name, "channel": ch_id})
         log.info("[%s] Added channel %s @ %.4f MHz", self.name, ch_id, channel.frequency / 1e6)
+
 
     async def remove_channel(self, ch_id: str):
         """Stop and remove a channel."""

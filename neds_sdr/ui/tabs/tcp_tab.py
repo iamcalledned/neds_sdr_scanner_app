@@ -1,5 +1,4 @@
-"""
-tcp_tab.py
+""" tcp_tab.py
 Dongle management and live control interface for Neds SDR Control.
 """
 
@@ -69,6 +68,7 @@ class TcpTab(QtWidgets.QWidget):
             self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(str(port)))
 
             # Gain slider
+            # Note: Using lambda with default arguments `n=name` is important for capturing the current row's name.
             gain_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
             gain_slider.setMinimum(0)
             gain_slider.setMaximum(50)
@@ -87,11 +87,13 @@ class TcpTab(QtWidgets.QWidget):
 
             # Connect button
             connect_btn = QtWidgets.QPushButton("Connect")
+            connect_btn.setEnabled(not running)
             connect_btn.clicked.connect(lambda _, n=name: asyncio.create_task(self.connect_dongle(n)))
             self.table.setCellWidget(row, 5, connect_btn)
 
             # Disconnect button
             disconnect_btn = QtWidgets.QPushButton("Disconnect")
+            disconnect_btn.setEnabled(running)
             disconnect_btn.clicked.connect(lambda _, n=name: asyncio.create_task(self.disconnect_dongle(n)))
             self.table.setCellWidget(row, 6, disconnect_btn)
 
@@ -112,11 +114,26 @@ class TcpTab(QtWidgets.QWidget):
         self.app.log_tab.append_log(f"[UI] Set {name} gain → {gain} dB")
 
     async def connect_dongle(self, name: str):
-        """Connect dongle live."""
+        """Connect dongle live and create a default channel."""
         d = self.app.device_manager.dongles.get(name)
+        # If the receiver exists and isn't already running, connect it
         if d and not getattr(d, "running", False):
+            print("awaiting to connect dongle...")
             await d.connect()
-            self.app.log_tab.append_log(f"[UI] Connected dongle {name}")
+            
+            # Create a default channel on connect.
+            # This relies on d.add_channel() to correctly call channel.start()
+            # which performs the tuning.
+            await d.add_channel({
+                "id": "ch0",
+                "frequency": 145_500_000.0,  # 145.500 MHz
+                "squelch": -50.0,
+                "tone_type": None,
+                "tone_value": None,
+                "sink": "default",
+            })
+            self.app.log_tab.append_log(f"[UI] Connected dongle {name} and created ch0")
+            # The incorrect print statement was removed here.
             self.refresh_table()
 
     async def disconnect_dongle(self, name: str):
