@@ -189,46 +189,107 @@ class DeviceManager:
         gain: float = 29.7,
         auto_connect: bool = False,
     ) -> Optional[SDRReceiver]:
+        """
+        Attach a new SDRReceiver instance to a running rtl_tcp server.
+
+        Args:
+            host: hostname or IP of rtl_tcp server
+            port: TCP port number
+            name: optional receiver name; defaults to "tcp_<host>_<port>"
+            gain: initial tuner gain (in dB)
+            auto_connect: if True, automatically connect() the receiver
+
+        Returns:
+            SDRReceiver instance, or None on failure
+        """
         hostname = host or "127.0.0.1"
+
         try:
             port = int(port)
         except Exception:
             log.error("DeviceManager.attach_tcp invalid port: %s", port)
             return None
 
+        # default name if not provided
         if not name:
             name = f"tcp_{hostname.replace('.', '_')}_{port}"
 
+        # prevent duplicate receiver names
         if name in self.receivers:
             log.warning("DeviceManager.attach_tcp: receiver name already exists: %s", name)
             return self.receivers[name]
 
         try:
-            receiver = SDRReceiver(name=name, host=hostname, port=port, gain=gain, event_bus=self.event_bus)
-            self.receivers[name] = receiver
-            self.tcp_servers.setdefault(port, {"proc": None, "device_index": None, "status": "found"})
-            log.info("DeviceManager: created receiver placeholder %s -> %s:%d", name, hostname, port)
+            # Create a receiver (no hardcoding; fully dynamic)
+            receiver = SDRReceiver(
+                name=name,
+                host=hostname,
+                port=port,
+                gain=gain,
+                event_bus=self.event_bus,
+            )
 
+            # register it
+            self.receivers[name] = receiver
+            self.tcp_servers.setdefault(
+                port, {"proc": None, "device_index": None, "status": "found"}
+            )
+
+            log.info("DeviceManager: created receiver %s -> %s:%d", name, hostname, port)
+
+            # Notify UI or backend listeners
+            self.event_bus.emit(
+                "receiver_created",
+                {"name": name, "host": hostname, "port": port, "gain": gain},
+            )
+
+            # Auto-connect if requested
             if auto_connect:
                 async def _try_connect():
                     try:
                         await receiver.connect()
                         self.tcp_servers[port]["status"] = "connected"
-                        self.event_bus.emit("receiver_connected", {"name": name, "port": port})
-                        log.info("DeviceManager: receiver %s connected to %s:%d", name, hostname, port)
+                        self.event_bus.emit(
+                            "receiver_connected",
+                            {"name": name, "port": port},
+                        )
+                        log.info(
+                            "DeviceManager: receiver %s connected to %s:%d",
+                            name,
+                            hostname,
+                            port,
+                        )
+
+                        # also emit initial channel preset update to UI
+                        self.event_bus.emit(
+                            "channel_presets_updated",
+                            {
+                                "dongle": receiver.name,
+                                "presets": receiver.presets.list_presets(),
+                            },
+                        )
                     except Exception as e:
-                        log.error("DeviceManager: auto-connect failed for %s:%d: %s", hostname, port, e)
+                        log.error(
+                            "DeviceManager: auto-connect failed for %s:%d: %s",
+                            hostname,
+                            port,
+                            e,
+                        )
                         self.tcp_servers[port]["status"] = "connect_failed"
                         self.event_bus.emit(
-                            "receiver_connect_failed", {"name": name, "port": port, "error": str(e)}
+                            "receiver_connect_failed",
+                            {"name": name, "port": port, "error": str(e)},
                         )
 
                 try:
                     asyncio.get_event_loop().create_task(_try_connect())
                 except RuntimeError:
-                    log.warning("No running asyncio loop; cannot schedule auto_connect task.")
+                    log.warning(
+                        "DeviceManager.attach_tcp: No running asyncio loop; cannot schedule auto_connect task."
+                    )
 
             return receiver
+
         except Exception as e:
             log.error("DeviceManager.attach_tcp failed: %s", e)
             return None

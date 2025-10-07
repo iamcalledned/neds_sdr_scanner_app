@@ -1,121 +1,204 @@
 """
-channel.py
-Defines individual channel configurations and DSP logic.
-
-Each Channel instance belongs to an SDRReceiver and represents
-a single tuned frequency path with its own squelch, tone detector,
-and audio output sink.
-
-When squelch opens, demodulated audio is written to the sink (PulseAudio
-or named pipe). When squelch closes, audio output stops immediately.
+channels_tab.py
+Provides the Channels UI tab for adding, editing, and tuning SDR channels.
 """
 
 import asyncio
-import numpy as np
-import logging
-from neds_sdr.core.squelch import SquelchGate
-from neds_sdr.core.tone_detector import ToneDetector
-from neds_sdr.dsp.fm_demod import fm_demodulate
-from neds_sdr.core.audio_output import AudioOutput
-
-log = logging.getLogger("Channel")
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QLineEdit, QComboBox, QDoubleSpinBox,
+    QSpinBox, QListWidget, QListWidgetItem, QMessageBox
+)
+from PySide6.QtCore import Qt
 
 
-class Channel:
-    """Represents a single demodulated audio channel."""
+class ChannelsTab(QWidget):
+    """
+    UI tab for channel preset management and live tuning.
+    """
 
-    def __init__(self, id: str, frequency: float, squelch: float,
-                 tone_type: str | None, tone_value: float | None,
-                 sink: str, receiver, event_bus):
-        """
-        Args:
-            id: Channel identifier (e.g., 'ch_0')
-            frequency: Frequency in Hz
-            squelch: Squelch threshold (dB)
-            tone_type: 'PL', 'DPL', or None
-            tone_value: Tone frequency (Hz) or code
-            sink: PulseAudio sink or pipe name
-            receiver: Parent SDRReceiver
-            event_bus: Shared event bus for UI and backend
-        """
-        self.id = id
-        self.frequency = frequency
-        self.squelch_level = squelch
-        self.tone_type = tone_type
-        self.tone_value = tone_value
-        self.sink = sink
-        self.receiver = receiver
+    def __init__(self, app_ctx, event_bus, parent=None):
+        super().__init__(parent)
+        self.app = app_ctx
         self.event_bus = event_bus
-        self.running = False
 
-        # Signal processing
-        self.squelch = SquelchGate(threshold_db=self.squelch_level)
-        self.tone = ToneDetector(tone_type=self.tone_type,
-                                 tone_value=self.tone_value,
-                                 sample_rate=48000)
-        self.audio = AudioOutput(self.sink, sample_rate=48000)
-        self._last_phase = 0.0
-        self._open = False
+        self._setup_ui()
+        self._connect_signals()
 
-    # -------------------------------------------------------------------------
-    # Lifecycle
-    # -------------------------------------------------------------------------
+        self.current_dongle = None
+        self.presets = {}
 
-    async def start(self):
-        """Tune frequency and mark channel active."""
-        self.running = True
-        await self.receiver.client.set_frequency(self.frequency)
-        log.info("[%s:%s] Channel started @ %.4f MHz",
-                 self.receiver.name, self.id, self.frequency / 1e6)
+    # ------------------------------------------------------------------
+    # UI layout
+    # ------------------------------------------------------------------
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
 
-    async def stop(self):
-        """Stop channel processing."""
-        self.running = False
-        log.info("[%s:%s] Channel stopped.", self.receiver.name, self.id)
+        # --- Receiver selection ---
+        recv_layout = QHBoxLayout()
+        recv_layout.addWidget(QLabel("Receiver:"))
+        self.receiver_combo = QComboBox()
+        recv_layout.addWidget(self.receiver_combo)
+        layout.addLayout(recv_layout)
 
-    # -------------------------------------------------------------------------
-    # DSP Chain
-    # -------------------------------------------------------------------------
+        # --- Preset list ---
+        self.preset_list = QListWidget()
+        layout.addWidget(QLabel("Channel Presets:"))
+        layout.addWidget(self.preset_list)
 
-    async def process_samples(self, iq: np.ndarray):
-        """
-        Demodulate and process IQ samples.
-        Applies FM demod, squelch, and tone detection.
-        """
-        if not self.running or iq.size < 4:
+        # --- Channel configuration form ---
+        form_layout = QHBoxLayout()
+        form_layout.addWidget(QLabel("Name:"))
+        self.name_input = QLineEdit()
+        form_layout.addWidget(self.name_input)
+
+        form_layout.addWidget(QLabel("Freq (MHz):"))
+        self.freq_input = QDoubleSpinBox()
+        self.freq_input.setRange(0.01, 3000.0)
+        self.freq_input.setDecimals(6)
+        form_layout.addWidget(self.freq_input)
+
+        form_layout.addWidget(QLabel("Gain (dB):"))
+        self.gain_input = QSpinBox()
+        self.gain_input.setRange(0, 60)
+        form_layout.addWidget(self.gain_input)
+
+        form_layout.addWidget(QLabel("Squelch (dB):"))
+        self.squelch_input = QSpinBox()
+        self.squelch_input.setRange(-120, 0)
+        self.squelch_input.setValue(-50)
+        form_layout.addWidget(self.squelch_input)
+
+        layout.addLayout(form_layout)
+
+        # --- Tone + Sink ---
+        tone_layout = QHBoxLayout()
+        tone_layout.addWidget(QLabel("Tone Type:"))
+        self.tone_type_combo = QComboBox()
+        self.tone_type_combo.addItems(["None", "PL", "DPL"])
+        tone_layout.addWidget(self.tone_type_combo)
+
+        tone_layout.addWidget(QLabel("Tone Value:"))
+        self.tone_value_input = QDoubleSpinBox()
+        self.tone_value_input.setRange(0.0, 300.0)
+        self.tone_value_input.setDecimals(1)
+        tone_layout.addWidget(self.tone_value_input)
+
+        tone_layout.addWidget(QLabel("Sink:"))
+        self.sink_input = QLineEdit("default")
+        tone_layout.addWidget(self.sink_input)
+        layout.addLayout(tone_layout)
+
+        # --- Buttons ---
+        btn_layout = QHBoxLayout()
+        self.add_btn = QPushButton("Add Preset")
+        self.remove_btn = QPushButton("Remove")
+        self.tune_btn = QPushButton("Tune")
+        btn_layout.addWidget(self.add_btn)
+        btn_layout.addWidget(self.remove_btn)
+        btn_layout.addWidget(self.tune_btn)
+        layout.addLayout(btn_layout)
+
+        layout.addStretch()
+        self.setLayout(layout)
+
+    # ------------------------------------------------------------------
+    # Signals & events
+    # ------------------------------------------------------------------
+    def _connect_signals(self):
+        self.add_btn.clicked.connect(self._on_add_clicked)
+        self.remove_btn.clicked.connect(self._on_remove_clicked)
+        self.tune_btn.clicked.connect(self._on_tune_clicked)
+        self.receiver_combo.currentIndexChanged.connect(self._on_receiver_changed)
+
+        self.event_bus.on("channel_presets_updated", self._on_presets_updated)
+
+    # ------------------------------------------------------------------
+    # Event handlers
+    # ------------------------------------------------------------------
+    def _on_receiver_changed(self, idx):
+        if idx < 0:
+            return
+        name = self.receiver_combo.currentText()
+        self.current_dongle = name
+        self._refresh_presets()
+
+    def _on_presets_updated(self, data):
+        dongle = data["dongle"]
+        if dongle == self.current_dongle:
+            self._refresh_presets()
+
+    def _refresh_presets(self):
+        self.preset_list.clear()
+        if not self.current_dongle:
+            return
+        receiver = self.app.device_manager.receivers.get(self.current_dongle)
+        if receiver:
+            for name in receiver.presets.list_presets():
+                item = QListWidgetItem(name)
+                self.preset_list.addItem(item)
+
+    async def _do_tune(self, name):
+        receiver = self.app.device_manager.receivers.get(self.current_dongle)
+        if not receiver:
+            QMessageBox.warning(self, "No Receiver", "Please select a receiver first.")
+            return
+        await receiver.set_channel(name)
+
+    def _on_tune_clicked(self):
+        item = self.preset_list.currentItem()
+        if not item:
+            return
+        asyncio.create_task(self._do_tune(item.text()))
+
+    def _on_add_clicked(self):
+        if not self.current_dongle:
+            QMessageBox.warning(self, "No Receiver", "Select a receiver first.")
+            return
+        receiver = self.app.device_manager.receivers.get(self.current_dongle)
+        if not receiver:
             return
 
-        # --- FM demodulation ---
-        demod, self._last_phase = fm_demodulate(iq, self._last_phase)
+        name = self.name_input.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Missing Name", "Please enter a channel name.")
+            return
 
-        # --- Squelch + Tone Detection ---
-        squelch_open = self.squelch.update(demod)
-        tone_match = self.tone.match(demod)
+        freq_mhz = self.freq_input.value()
+        gain = self.gain_input.value()
+        squelch = self.squelch_input.value()
+        tone_type = self.tone_type_combo.currentText()
+        tone_value = self.tone_value_input.value()
+        sink = self.sink_input.text().strip() or "default"
 
-        if squelch_open and tone_match:
-            if not self._open:
-                self._open = True
-                self.event_bus.emit("squelch_open", {
-                    "dongle": self.receiver.name,
-                    "channel": self.id,
-                    "freq": self.frequency
-                })
-                log.info("[%s:%s] Squelch OPEN @ %.4f MHz",
-                         self.receiver.name, self.id, self.frequency / 1e6)
+        receiver.presets.add_preset(
+            name=name,
+            frequency=freq_mhz * 1e6,
+            squelch=squelch,
+            tone_type=None if tone_type == "None" else tone_type,
+            tone_value=tone_value if tone_type != "None" else None,
+            sink=sink
+        )
 
-            # --- Route audio to sink ---
-            self.audio.write(demod)
+        self._refresh_presets()
 
-        elif self._open:
-            # Transition: open -> closed
-            self._open = False
-            self.event_bus.emit("squelch_closed", {
-                "dongle": self.receiver.name,
-                "channel": self.id,
-                "freq": self.frequency
-            })
-            log.info("[%s:%s] Squelch CLOSED @ %.4f MHz",
-                     self.receiver.name, self.id, self.frequency / 1e6)
+    def _on_remove_clicked(self):
+        item = self.preset_list.currentItem()
+        if not item:
+            return
+        name = item.text()
+        receiver = self.app.device_manager.receivers.get(self.current_dongle)
+        if receiver:
+            receiver.presets.remove_preset(name)
+            self._refresh_presets()
 
-        # Give event loop a chance to breathe
-        await asyncio.sleep(0.005)
+    # ------------------------------------------------------------------
+    # API for parent window
+    # ------------------------------------------------------------------
+    def refresh_receivers(self):
+        """Populate receiver list when devices connect."""
+        self.receiver_combo.clear()
+        for name in self.app.device_manager.receivers.keys():
+            self.receiver_combo.addItem(name)
+        if self.receiver_combo.count() > 0:
+            self.receiver_combo.setCurrentIndex(0)

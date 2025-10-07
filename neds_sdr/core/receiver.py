@@ -11,7 +11,8 @@ import asyncio
 import logging
 import numpy as np
 from neds_sdr.core.rtl_tcp_client import RTL_TCP_Client
-from neds_sdr.core.channel import Channel
+#from neds_sdr.core.channel import Channel
+from neds_sdr.core.channels_manager import ChannelsManager
 
 log = logging.getLogger("SDRReceiver")
 
@@ -30,6 +31,9 @@ class SDRReceiver:
         self.running = False
         self.channels: dict[str, Channel] = {}
         self._rx_task: asyncio.Task | None = None
+
+        # Per-dongle preset manager
+        self.presets = ChannelsManager(self, event_bus)
 
     # -------------------------------------------------------------------------
     # Lifecycle
@@ -88,6 +92,8 @@ class SDRReceiver:
 
     async def add_channel(self, channel_config: dict):
         """Create and start a new logical channel for this dongle."""
+        from neds_sdr.core.channel import Channel  # ← move it here
+
         ch_id = channel_config.get("id", f"ch_{len(self.channels)}")
         if ch_id in self.channels:
             log.warning("[%s] Channel %s already exists.", self.name, ch_id)
@@ -107,6 +113,15 @@ class SDRReceiver:
         del self.channels[ch_id]
         self.event_bus.emit("channel_removed", {"dongle": self.name, "channel": ch_id})
         log.info("[%s] Removed channel %s", self.name, ch_id)
+
+    async def set_channel(self, preset_name: str):
+        """
+        Use ChannelsManager to stop current channels and start a preset channel.
+        """
+        if not self.running:
+            log.warning("[%s] Receiver not running.", self.name)
+            return
+        await self.presets.set_channel(preset_name)
 
     # -------------------------------------------------------------------------
     # Persistent RX Loop
