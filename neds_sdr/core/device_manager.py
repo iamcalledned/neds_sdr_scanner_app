@@ -234,10 +234,6 @@ class DeviceManager:
             return None
 
     # -------------------------
-    # UI Compatibility Property
-    # -------------------------
-    @property
-    # -------------------------
     # UI / Runtime Accessors
     # -------------------------
     @property
@@ -249,6 +245,49 @@ class DeviceManager:
     def usb_devices_info(self) -> List[Dict]:
         """Return raw USB hardware info separately for startup UI."""
         return list(self.usb_devices)
+
+
+    # -------------------------
+    # UI Helper Methods
+    # -------------------------
+    async def add_dongle(self, name: str, host: str, port: int, gain: float):
+        """Add and attach new SDRReceiver by host:port."""
+        if name in self.receivers:
+            log.warning("DeviceManager.add_dongle: %s already exists", name)
+            return self.receivers[name]
+        recv = self.attach_tcp(host, port, name=name, gain=gain)
+        if recv:
+            await recv.connect()
+            log.info("DeviceManager: Added dongle %s (%s:%d)", name, host, port)
+        return recv
+
+    async def set_gain(self, name: str, gain: float):
+        """Set gain live for a receiver."""
+        recv = self.receivers.get(name)
+        if not recv:
+            return
+        recv.gain = gain
+        try:
+            await recv.client.set_gain(gain)
+            log.info("[%s] gain -> %.1f dB", name, gain)
+        except Exception as e:
+            log.error("DeviceManager.set_gain error: %s", e)
+
+    async def retune_channel(self, dongle: str, channel: str, freq_mhz: float):
+        """Retune a channel by dongle/channel name."""
+        recv = self.receivers.get(dongle)
+        if not recv:
+            log.error("No receiver %s for retune", dongle)
+            return
+        ch = recv.channels.get(channel)
+        if not ch:
+            log.error("No channel %s on %s", channel, dongle)
+            return
+        await ch.set_frequency(freq_mhz * 1e6)
+        log.info("Retuned %s/%s → %.4f MHz", dongle, channel, freq_mhz)
+
+
+
     # -------------------------
     # Shutdown helpers
     # -------------------------
