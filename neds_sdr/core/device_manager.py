@@ -237,26 +237,18 @@ class DeviceManager:
     # UI Compatibility Property
     # -------------------------
     @property
-    def dongles(self) -> Dict[str, object]:
-        """
-        Return a dict for UI (name -> SDRReceiver or info object).
-        This ensures tcp_tab.py can safely call dongles.items().
-        """
-        result = {}
+    # -------------------------
+    # UI / Runtime Accessors
+    # -------------------------
+    @property
+    def dongles(self) -> Dict[str, "SDRReceiver"]:
+        """Return only active SDRReceiver objects (for live tabs)."""
+        return dict(self.receivers)
 
-        for name, recv in self.receivers.items():
-            result[name] = recv
-
-        for dev in self.usb_devices:
-            name = f"usb_{dev['index']}"
-            result[name] = {
-                "index": dev["index"],
-                "description": dev.get("description", "RTL-SDR device"),
-                "type": "usb",
-            }
-
-        return result
-
+    @property
+    def usb_devices_info(self) -> List[Dict]:
+        """Return raw USB hardware info separately for startup UI."""
+        return list(self.usb_devices)
     # -------------------------
     # Shutdown helpers
     # -------------------------
